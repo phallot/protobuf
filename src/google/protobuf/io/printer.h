@@ -473,7 +473,37 @@ class PROTOBUF_EXPORT Printer {
     int line() { return 0; }
   };
 
-  struct AnnotationRecord;
+  struct AnnotationRecord {
+    std::vector<int> path;
+    std::string file_path;
+    absl::optional<AnnotationCollector::Semantic> semantic;
+
+    // AnnotationRecord's constructors are *not* marked as explicit,
+    // specifically so that it is possible to construct a
+    // map<string, AnnotationRecord> by writing
+    //
+    // {{"foo", my_cool_descriptor}, {"bar", "file.proto"}}
+
+    template <
+        typename String,
+        std::enable_if_t<std::is_convertible<const String&, std::string>::value,
+                        int> = 0>
+    AnnotationRecord(  // NOLINT(google-explicit-constructor)
+        const String& file_path,
+        absl::optional<AnnotationCollector::Semantic> semantic = absl::nullopt)
+        : file_path(file_path), semantic(semantic) {}
+
+    template <typename Desc,
+              // This SFINAE clause excludes char* from matching this
+              // constructor.
+              std::enable_if_t<std::is_class<Desc>::value, int> = 0>
+    AnnotationRecord(  // NOLINT(google-explicit-constructor)
+        const Desc* desc,
+        absl::optional<AnnotationCollector::Semantic> semantic = absl::nullopt)
+        : file_path(desc->file()->name()), semantic(semantic) {
+      desc->GetLocationPath(&path);
+    }
+  };
 
  public:
   static constexpr char kDefaultVariableDelimiter = '$';
@@ -677,7 +707,73 @@ class PROTOBUF_EXPORT Printer {
 
   // Helper type for wrapping a variable substitution expansion result.
   template <bool owned>
-  struct ValueImpl;
+  struct ValueImpl {
+  private:
+    template <typename T>
+    struct IsSubImpl : std::false_type {};
+    template <bool a>
+    struct IsSubImpl<ValueImpl<a>> : std::true_type {};
+
+  public:
+    using StringType = std::conditional_t<owned, std::string, absl::string_view>;
+    // These callbacks return false if this is a recursive call.
+    using Callback = std::function<bool()>;
+    using StringOrCallback = absl::variant<StringType, Callback>;
+
+    ValueImpl() = default;
+
+    // This is a template to avoid colliding with the copy constructor below.
+    template <typename Value,
+              typename = std::enable_if_t<
+                  !IsSubImpl<absl::remove_cvref_t<Value>>::value>>
+    ValueImpl(Value&& value)  // NOLINT
+        : value(ToStringOrCallback(std::forward<Value>(value), Rank2{})) {
+      if (absl::holds_alternative<Callback>(this->value)) {
+        consume_after = ";,";
+      }
+    }
+
+    // Copy ctor/assign allow interconversion of the two template parameters.
+    template <bool that_owned>
+    ValueImpl(const ValueImpl<that_owned>& that) {  // NOLINT
+      *this = that;
+    }
+
+    template <bool that_owned>
+    ValueImpl& operator=(const ValueImpl<that_owned>& that);
+
+    const StringType* AsString() const {
+      return absl::get_if<StringType>(&value);
+    }
+
+    const Callback* AsCallback() const { return absl::get_if<Callback>(&value); }
+
+    StringOrCallback value;
+    std::string consume_after;
+
+  private:
+    // go/ranked-overloads
+    struct Rank0 {};
+    struct Rank1 : Rank0 {};
+    struct Rank2 : Rank1 {};
+
+    // Dummy template for delayed instantiation, which is required for the
+    // static assert below to kick in only when this function is called when it
+    // shouldn't.
+    //
+    // This is done to produce a better error message than the "candidate does
+    // not match" SFINAE errors.
+    template <typename Cb, typename = decltype(std::declval<Cb&&>()())>
+    StringOrCallback ToStringOrCallback(Cb&& cb, Rank2);
+
+    // Separate from the AlphaNum overload to avoid copies when taking strings
+    // by value when in `owned` mode.
+    StringOrCallback ToStringOrCallback(StringType s, Rank1) { return s; }
+
+    StringOrCallback ToStringOrCallback(const absl::AlphaNum& s, Rank0) {
+      return StringType(s.Piece());
+    }
+  };
 
   using ValueView = ValueImpl</*owned=*/false>;
   using Value = ValueImpl</*owned=*/true>;
@@ -809,76 +905,6 @@ struct Printer::PrintOptions {
   bool use_annotation_frames = true;
 };
 
-// Helper type for wrapping a variable substitution expansion result.
-template <bool owned>
-struct Printer::ValueImpl {
- private:
-  template <typename T>
-  struct IsSubImpl : std::false_type {};
-  template <bool a>
-  struct IsSubImpl<ValueImpl<a>> : std::true_type {};
-
- public:
-  using StringType = std::conditional_t<owned, std::string, absl::string_view>;
-  // These callbacks return false if this is a recursive call.
-  using Callback = std::function<bool()>;
-  using StringOrCallback = absl::variant<StringType, Callback>;
-
-  ValueImpl() = default;
-
-  // This is a template to avoid colliding with the copy constructor below.
-  template <typename Value,
-            typename = std::enable_if_t<
-                !IsSubImpl<absl::remove_cvref_t<Value>>::value>>
-  ValueImpl(Value&& value)  // NOLINT
-      : value(ToStringOrCallback(std::forward<Value>(value), Rank2{})) {
-    if (absl::holds_alternative<Callback>(this->value)) {
-      consume_after = ";,";
-    }
-  }
-
-  // Copy ctor/assign allow interconversion of the two template parameters.
-  template <bool that_owned>
-  ValueImpl(const ValueImpl<that_owned>& that) {  // NOLINT
-    *this = that;
-  }
-
-  template <bool that_owned>
-  ValueImpl& operator=(const ValueImpl<that_owned>& that);
-
-  const StringType* AsString() const {
-    return absl::get_if<StringType>(&value);
-  }
-
-  const Callback* AsCallback() const { return absl::get_if<Callback>(&value); }
-
-  StringOrCallback value;
-  std::string consume_after;
-
- private:
-  // go/ranked-overloads
-  struct Rank0 {};
-  struct Rank1 : Rank0 {};
-  struct Rank2 : Rank1 {};
-
-  // Dummy template for delayed instantiation, which is required for the
-  // static assert below to kick in only when this function is called when it
-  // shouldn't.
-  //
-  // This is done to produce a better error message than the "candidate does
-  // not match" SFINAE errors.
-  template <typename Cb, typename = decltype(std::declval<Cb&&>()())>
-  StringOrCallback ToStringOrCallback(Cb&& cb, Rank2);
-
-  // Separate from the AlphaNum overload to avoid copies when taking strings
-  // by value when in `owned` mode.
-  StringOrCallback ToStringOrCallback(StringType s, Rank1) { return s; }
-
-  StringOrCallback ToStringOrCallback(const absl::AlphaNum& s, Rank0) {
-    return StringType(s.Piece());
-  }
-};
-
 template <bool owned>
 template <bool that_owned>
 Printer::ValueImpl<owned>& Printer::ValueImpl<owned>::operator=(
@@ -917,38 +943,6 @@ auto Printer::ValueImpl<owned>::ToStringOrCallback(Cb&& cb, Rank2)
         return true;
       });
 }
-
-struct Printer::AnnotationRecord {
-  std::vector<int> path;
-  std::string file_path;
-  absl::optional<AnnotationCollector::Semantic> semantic;
-
-  // AnnotationRecord's constructors are *not* marked as explicit,
-  // specifically so that it is possible to construct a
-  // map<string, AnnotationRecord> by writing
-  //
-  // {{"foo", my_cool_descriptor}, {"bar", "file.proto"}}
-
-  template <
-      typename String,
-      std::enable_if_t<std::is_convertible<const String&, std::string>::value,
-                       int> = 0>
-  AnnotationRecord(  // NOLINT(google-explicit-constructor)
-      const String& file_path,
-      absl::optional<AnnotationCollector::Semantic> semantic = absl::nullopt)
-      : file_path(file_path), semantic(semantic) {}
-
-  template <typename Desc,
-            // This SFINAE clause excludes char* from matching this
-            // constructor.
-            std::enable_if_t<std::is_class<Desc>::value, int> = 0>
-  AnnotationRecord(  // NOLINT(google-explicit-constructor)
-      const Desc* desc,
-      absl::optional<AnnotationCollector::Semantic> semantic = absl::nullopt)
-      : file_path(desc->file()->name()), semantic(semantic) {
-    desc->GetLocationPath(&path);
-  }
-};
 
 class Printer::Sub {
  public:
