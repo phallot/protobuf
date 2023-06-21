@@ -627,11 +627,19 @@ PROTOBUF_ALWAYS_INLINE const char* TcParser::RepeatedFixed(
     }
   }
   auto& field = RefAt<RepeatedField<LayoutType>>(msg, data.offset());
-  const auto tag = UnalignedLoad<TagType>(ptr);
+  int idx = field.size();
+  auto elem = field.Add();
+  int space = field.Capacity() - idx;
+  idx = 0;
+  const auto expected_tag = UnalignedLoad<TagType>(ptr);
   do {
-    field.Add(UnalignedLoad<LayoutType>(ptr + sizeof(TagType)));
-    ptr += sizeof(TagType) + sizeof(LayoutType);
-  } while (ctx->DataAvailable(ptr) && UnalignedLoad<TagType>(ptr) == tag);
+    ptr += sizeof(TagType);
+    elem[idx++] = UnalignedLoad<LayoutType>(ptr);
+    ptr += sizeof(LayoutType);
+    if (idx >= space) break;
+    if (!ctx->DataAvailable(ptr)) break;
+  } while (UnalignedLoad<TagType>(ptr) == expected_tag);
+  field.AddNAlreadyReserved(idx - 1);
   PROTOBUF_MUSTTAIL return ToParseLoop(PROTOBUF_TC_PARAM_NO_DATA_PASS);
 }
 

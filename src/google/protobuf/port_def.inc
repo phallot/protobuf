@@ -568,15 +568,6 @@ static_assert(PROTOBUF_ABSL_MIN(20230125, 3),
 #define PROTOBUF_NODISCARD
 #endif
 
-#ifdef PROTOBUF_RESTRICT
-#error PROTOBUF_RESTRICT was previously defined
-#endif
-#if defined( __clang__) || defined(__GNUC__)
-#define PROTOBUF_RESTRICT __restrict
-#else
-#define PROTOBUF_RESTRICT
-#endif
-
 #ifdef PROTOBUF_FORCE_COPY_IN_RELEASE
 #error PROTOBUF_FORCE_COPY_IN_RELEASE was previously defined
 #endif
